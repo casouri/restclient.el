@@ -1,8 +1,9 @@
 # restclient.el
 
-Fork note: This is a personal fork, provided purely as-is. I’m not
-maintaining this fork. PR welcome but I might blindly merge it or
-ignore it.
+# Fork note
+
+This is a personal fork, provided purely as-is. I’m not maintaining
+this fork. Patches welcome but I might blindly merge it or ignore it.
 
 Changes I made:
 
@@ -24,6 +25,7 @@ query blah {
 }
 ```
 
+# Below are original README
 
 This is a tool to manually explore and test HTTP REST webservices.
 Runs queries from a plain-text query sheet,
