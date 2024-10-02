@@ -26,6 +26,7 @@
   (if (version< emacs-version "26")
       (require 'cl)
     (require 'cl-lib)))
+(require 'rx)
 
 (defgroup restclient nil
   "An interactive HTTP client for Emacs."
@@ -189,7 +190,7 @@
 (defconst restclient-empty-line-regexp "^\\s-*$")
 
 (defconst restclient-method-url-regexp
-  "^\\(GET\\|POST\\|DELETE\\|PUT\\|HEAD\\|OPTIONS\\|PATCH\\) \\(.*\\)$")
+  "^\\(GET\\|POST\\|DELETE\\|PUT\\|HEAD\\|OPTIONS\\|PATCH\\|GQL\\) \\(.*\\)$")
 
 (defconst restclient-header-regexp
   "^\\([^](),/:;@[\\{}= \t]+\\): \\(.*\\)$")
@@ -218,6 +219,9 @@
 (defconst restclient-response-hook-regexp
   "^\\(->\\) \\([^[:space:]]+\\) +\\(.*\\)$")
 
+(defconst restclient-gql-body-var-separator-regexp
+  (rx bol "=-="))
+
 ;; The following disables the interactive request for user name and
 ;; password should an API call encounter a permission-denied response.
 ;; This API is meant to be usable without constant asking for username
@@ -239,13 +243,45 @@
     ad-do-it))
 (ad-activate 'url-http-user-agent-string)
 
+(defun restclient-gql-convert-method (method)
+  "If METHOD is \"GQL\", convert it to \"POST\"."
+  (if (equal method "GQL") "POST" method))
+
+(defun restclient-gql-convert-body (method body)
+  "If METHOD is \"GQL\", convert BODY from a GQL body to a valid BODY.
+
+GQL body has two parts, the query and variables, separated by a line
+with \"=-=\" at the beginning. The variable part can be omitted.
+
+Convert the two into a JSON object suitable for the POST request."
+  (if (not (equal method "GQL"))
+      body
+    (with-temp-buffer
+      (insert (string-trim body))
+      (goto-char (point-min))
+      (let (query vars)
+        (if (not (re-search-forward
+                  restclient-gql-body-var-separator-regexp nil t))
+            (setq query (buffer-string)
+                  vars "")
+          (setq query (string-trim
+                       (buffer-substring (point-min) (match-beginning 0))))
+          (setq vars (string-trim
+                      (buffer-substring (match-end 0) (point-max)))))
+        (if (equal vars "")
+            (json-serialize `(:query ,query))
+          (json-serialize `(:query ,query :variables ,vars)))))))
+
 (defun restclient-http-do (method url headers entity &rest handle-args)
   "Send ENTITY and HEADERS to URL as a METHOD request."
   (if restclient-log-request
       (message "HTTP %s %s Headers:[%s] Body:[%s]" method url headers entity))
-  (let ((url-request-method (encode-coding-string method 'us-ascii))
+  (let ((url-request-method (encode-coding-string
+                             (restclient-gql-convert-method method)
+                             'us-ascii))
         (url-request-extra-headers '())
-        (url-request-data (encode-coding-string entity 'utf-8))
+        (url-request-data (restclient-gql-convert-body
+                           method (encode-coding-string entity 'utf-8)))
         (url-mime-charset-string (url-mime-charset-string))
         (url-mime-language-string nil)
         (url-mime-encoding-string nil)
@@ -586,11 +622,12 @@ bound to C-c C-r."
   (interactive)
   (restclient-http-parse-current-and-do
    '(lambda (method url headers entity)
-      (let ((header-args
-             (apply 'append
-                    (mapcar (lambda (header)
-                              (list "-H" (format "%s: %s" (car header) (cdr header))))
-                            headers))))
+      (let* ((method (restclient-gql-convert-method method))
+             (header-args
+              (apply 'append
+                     (mapcar (lambda (header)
+                               (list "-H" (format "%s: %s" (car header) (cdr header))))
+                             headers))))
         (kill-new (concat "curl "
                           (mapconcat 'shell-quote-argument
                                      (append '("-i")
@@ -598,7 +635,7 @@ bound to C-c C-r."
                                              (list (concat "-X" method))
                                              (list url)
                                              (when (> (string-width entity) 0)
-                                               (list "-d" entity)))
+                                               (list "-d" (restclient-gql-convert-body method entity))))
                                      " "))))
       (message "curl command copied to clipboard."))))
 

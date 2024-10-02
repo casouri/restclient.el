@@ -1,5 +1,30 @@
 # restclient.el
 
+Fork note: This is a personal fork, provided purely as-is. I’m not
+maintaining this fork. PR welcome but I might blindly merge it or
+ignore it.
+
+Changes I made:
+
+- Add GraphQL support, GraphQL requests looks like this:
+
+```
+GQL :mgql_dev
+Content-Type: application/json
+
+query blah {
+  fields {
+    subfields
+    subfields
+  }
+}
+=-=
+{
+  "var1": "abc"
+}
+```
+
+
 This is a tool to manually explore and test HTTP REST webservices.
 Runs queries from a plain-text query sheet,
 displays results as a pretty-printed XML, JSON and even images.
