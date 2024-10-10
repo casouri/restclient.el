@@ -140,8 +140,8 @@ enum, a union, or an interface."
         "Arguments of a query. A list of input fields.")
   (subfields nil :type (list gql-builder-field) :documentation
              "Subfields of this field.")
-  (input nil :type boolean :documentation
-         "If non-nil, this field is an input field.")
+  (input-p nil :type boolean :documentation
+           "If non-nil, this field is an input field (aka arg).")
   (expanded nil :type boolean :documentation
             "Whether this field has been expanded.")
   (marked nil :type boolean :documentation
@@ -320,7 +320,7 @@ mean this field is an input field (aka an arg)."
              (mapcar (lambda (field)
                        (gql-builder--make-field field t))
                      args))
-     :input input-field)))
+     :input-p input-field)))
 
 (defun gql-builder--make-possible-type-field (possible-type)
   "Create a ‘gql-builder-field’ from POSSIBLE-TYPE.
@@ -512,7 +512,7 @@ FIELDS is a list of ‘gql-builder-field’. INDENT-LEVEL is the nesting
 level of the fields."
   (dolist (field (seq-sort-by #'gql-builder-field-index #'< fields))
     (pcase-let (((cl-struct gql-builder-field
-                            name type args subfields marked expanded arg-val input)
+                            name type args subfields marked expanded arg-val input-p)
                  field))
       (insert (propertize
                (concat
@@ -522,7 +522,7 @@ level of the fields."
                     gql-builder-marker-marked
                   gql-builder-marker-unmarked)
                 ;; ARG.
-                (if input
+                (if input-p
                     (propertize "ARG " 'face 'gql-builder-arg-marker)
                   "")
                 ;; Field name.
@@ -552,7 +552,7 @@ level of the fields."
           (when-let ((new-subfields (gql-builder--get-fields-for-type
                                      gql-builder--schema
                                      (gql-builder--type-name type)
-                                     input)))
+                                     input-p)))
             (setf (gql-builder-field-subfields field)
                   new-subfields
                   subfields
@@ -630,7 +630,7 @@ VAL can be a string, a number, t, or :false."
          (field (get-text-property (point) 'gql-builder-field))
          (type (gql-builder-field-type field))
          (old-val (gql-builder-field-arg-val field))
-         (arg-p (gql-builder-field-input field)))
+         (arg-p (gql-builder-field-input-p field)))
     (when arg-p
       (if (not (string-match-p (rx bos
                                    (or "String" "Int" "Boolean" "Float" "ID")
