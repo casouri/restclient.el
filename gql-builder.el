@@ -121,54 +121,84 @@ fragment TypeRef on __Type {
 }"
   "Query we use to get all the queries, mutations, and types.")
 
+
+;;;; Types
+
+(cl-defstruct gql-builder-field
+  "A field or arg in a query.
+
+Queries and mutations are also fields. Queries are fields of a special
+type \"Query\". (By convention the type is \"Query\", but a schema can
+choose another value by the queryType field), likewise for mutations.
+
+If TYPE is a (Type <string>), it’s either a named type, a scalar, an
+enum, a union, or an interface."
+  (name nil :type string :documentation "Name of the field.")
+  (type nil :type list :documentation
+        "Either (Type <string>), (List TYPE), or (Non-null TYPE).")
+  (args nil :type (list gql-builder-field) :documentation
+        "Arguments of a query. A list of input fields.")
+  (subfields nil :type (list gql-builder-field) :documentation
+             "Subfields of this field.")
+  (input nil :type boolean :documentation
+         "If non-nil, this field is an input field.")
+  (expanded nil :type boolean :documentation
+            "Whether this field has been expanded.")
+  (marked nil :type boolean :documentation
+          "Whether this field has been marked for export.")
+  (arg-val nil :type string :documentation
+           "The value for this field, if it’s an arg (aka input field).")
+  (index 0 :type number :documentation
+         "The index of this field among its siblings, used for display."))
+
 ;;;; UI state
 
-(defvar-local gql-builder--ui-state '()
-  "Expansion state and other states for each query field in the current buffer.
-The value is a alist, where each key is the path to the field,
-like (\"fieldB\" \"fieldA\"), and the value is another alist mapping state keys
-to state values.
+(defvar-local gql-builder--fields '()
+  "Field date for the current builder buffer. A list of ‘gql-builder-field’s.")
 
-In terms of JSON, (\"fieldB\" \"fieldA\") corresponds to
+(defun gql-builder--rebuild-fields (old-fields new-fields)
+  "Populate NEW-FIELDS with data from OLD-FIELDS.
 
-{
-  \"fieldA\": {
-    \"fieldB\": <- This field.
-  }
-}
+Specifically, copy the value of ‘expanded’, ‘marked’, ‘arg-val’, and
+‘index’."
+  (dolist (new-field new-fields)
+    (when-let* ((new-name (gql-builder-field-name new-field))
+                (old-field (seq-find
+                            (lambda (old-field)
+                              (equal new-name
+                                     (gql-builder-field-name old-field)))
+                            old-fields)))
 
-Right now we have the following state keys:
-- expanded: Whether the field is expanded.
-- arg-expanded: Whether the arg is expanded.
-- marked: Whether the field is marked.
-- arg-marked: Whether the arg is marked.
-- arv-val: Arg value for the arg.
+      (pcase-let (((cl-struct gql-builder-field
+                              name type args subfields marked expanded arg-val)
+                   ))
+        (setf (gql-builder-field-expanded new-field)
+              (gql-builder-field-expanded old-field)
 
-I’m not sure if fields and args can have the same name without conflict
-in GraphQL; just to be safe, I used different keys for fields and args.")
+              (gql-builder-field-marked new-field)
+              (gql-builder-field-marked old-field)
 
-(defsubst gql-builder--get-state (field-path key)
-  "Get the value for the GraphQL field at FIELD-PATH.
-Each field has many states, KEY specifies the particular state we want."
-  (alist-get key (alist-get field-path gql-builder--ui-state
-                            nil nil #'equal)))
+              (gql-builder-field-arg-val new-field)
+              (gql-builder-field-arg-val old-field)
 
-(defsubst gql-builder--set-state (field-path key val)
-  "Set state pair KEY VAL for the GraphQL specified by FIELD-PATH."
-  (setf (alist-get key (alist-get field-path gql-builder--ui-state
-                                  nil t #'equal))
-        val))
+              (gql-builder-field-index new-field)
+              (gql-builder-field-index old-field))))))
 
-(defsubst gql-builder--get-state-at-point (key)
-  "Return the UI state for KEY of the field at point.
-Return nil if no state exists."
-  (when-let ((field-path (get-text-property (point) 'gql-builder-field-path)))
-    (gql-builder--get-state field-path key)))
+(defmacro gql-builder--get-state-at-point (key)
+  "Return the field state for KEY of the field at point.
+Return nil if no state exists. KEY doesn’t need to be quoted."
+  (let ((field-sym (gensym)))
+    `(when-let ((,field-sym (get-text-property (point) 'gql-builder-field)))
+       (,(intern (concat "gql-builder-field-" (symbol-name key))) ,field-sym))))
 
-(defsubst gql-builder--set-state-at-point (key val)
-  "Set the UI state for KEY to VAL for the field at point."
-  (when-let ((field-path (get-text-property (point) 'gql-builder-field-path)))
-    (gql-builder--set-state field-path key val)))
+(defmacro gql-builder--set-state-at-point (key val)
+  "Set the field state for KEY to VAL for the field at point.
+KEY doesn’t need to be quoted."
+  (let ((field-sym (gensym)))
+    `(when-let ((,field-sym (get-text-property (point) 'gql-builder-field)))
+       (setf (,(intern (concat "gql-builder-field-" (symbol-name key)))
+              ,field-sym)
+             ,val))))
 
 ;;;; Utilities
 
@@ -182,22 +212,6 @@ chain is nil, return ALIST."
     (setq alist (alist-get key alist))))
 
 ;;;; Retreiving and inspecting schema
-;;
-;; FIELD := (Field FIELD-NAME FIELD-TYPE ARGS)
-;; FIELD-NAME := <string>
-;; FIELD-TYPE := (Type <string>) | (List FIELD-TYPE) | (Non-null FIELD-TYPE)
-;; ARGS := [INPUT-FIELD]
-;; INPUT-FIELD := (InputField FIELD-NAME FIELD-TYPE)
-;;
-;; Notes:
-;;
-;; - Queries and mutations are also fields. Queries are fields of a
-;;   special type "Query". (By convention it’s "Query", but schema can
-;;   choose another value by assining the queryType field), likewise
-;;   for mutations.
-;;
-;; - If FIELD-TYPE is a (Type <string>), it’s either a named type, a
-;;   scalar, an enum, a union, or an interface.
 
 (defvar gql-builder--schema-cache nil
   "An alist mapping GraqphQL endpoint URL to schema JSON object.")
@@ -225,7 +239,7 @@ The value should be an alist with the following keys:
 (defun gql-builder--decode-type (type)
   "Decode TYPE into our internal structure FIELD-TYPE.
 
-See comments in the source file for the definition of FIELD-TYPE.
+See docstring of ‘gql-builder-field’ for possible shapes of FIELD-TYPE.
 TYPE is a JSON object from the schema."
   (pcase (alist-get 'kind type)
     ("LIST" `(List ,(gql-builder--decode-type
@@ -236,6 +250,14 @@ TYPE is a JSON object from the schema."
      (alist-get 'name type))
     (kind (signal 'gql-builder-schema-error
                   (list "Unexpected kind of a type" kind type)))))
+
+(defun gql-builder--type-name (type)
+  "Return TYPE’s plain name.
+TYPE is a FIELD-TYPE, return it’s name without the List, Non-null wrappers."
+  (pcase type
+    (`(List ,name) (gql-builder--type-name name))
+    (`(Non-null ,name) (gql-builder--type-name name))
+    (name name)))
 
 (defun gql-builder--check-type (type target)
   "Return t if TYPE is a TARGET type.
@@ -276,33 +298,44 @@ If NEW is non-nil, skip the schema cache and always get from remote."
   "Get the list of queries in SCHEMA.
 
 SCHEMA is a JSON object returned from ‘queery-builder--get-schema’.
-Return each query in the form of (Field FIELD-NAME FIELD-TYPE ARGS)."
+Return a list of ‘gql-builder-field’s."
   (let ((query-type-name
          (gql-builder--alist-get '(data __schema queryType name) schema)))
     (gql-builder--get-fields-for-type schema query-type-name)))
 
-(defun gql-builder--make-field (field)
-  "Create a (Field FIELD-NAME FIELD-TYPE ARGS) from FIELD.
-FIELD is an alist with ‘name’, ‘type’ as its keys."
+(defun gql-builder--make-field (field &optional input-field)
+  "Create a ‘gql-builder-field’ from FIELD using SCHEMA.
+
+FIELD is an alist with ‘name’, ‘type’ as its keys. INPUT-FIELD non-nil
+mean this field is an input field (aka an arg)."
   (let* ((name (gql-builder--alist-get '(name) field))
          (type (gql-builder--decode-type
                 (gql-builder--alist-get '(type) field)))
+         (type-name (gql-builder--type-name type))
          (args (gql-builder--alist-get '(args) field)))
-    `(Field ,name ,type ,(when args
-                           (mapcar #'gql-builder--make-field args)))))
+    (make-gql-builder-field
+     :name name
+     :type type
+     :args (when args
+             (mapcar (lambda (field)
+                       (gql-builder--make-field field t))
+                     args))
+     :input input-field)))
 
 (defun gql-builder--make-possible-type-field (possible-type)
-  "Create a (Field FIELD-NAME FIELD-TYPE ARGS) from POSSIBLE-TYPE.
-FIELD is an alist with ‘name’, ‘kind’ as its keys."
+  "Create a ‘gql-builder-field’ from POSSIBLE-TYPE.
+
+POSSIBLE-TYPE is an alist with ‘name’, ‘kind’ as its keys.
+The created field will have name as ... on NAME, and type as NAME."
   (let* ((name (gql-builder--alist-get '(name) possible-type)))
-    `(Field ,(format "... on %s" name) ,name)))
+    (make-gql-builder-field :name (format "... on %s" name) :type name)))
 
 (defun gql-builder--get-fields-for-type
     (schema type-name &optional input-fields)
   "Get the list of fields for TYPE-NAME in SCHEMA.
 
 SCHEMA is a JSON object returned from ‘queery-builder--get-schema’.
-Return each field in the form of (Field FIELD-NAME FIELD-TYPE).
+Return each field as a ‘gql-builder-field’.
 
 If input-fields is non-nil, get input fields instead."
   (let* ((type-obj
@@ -318,121 +351,30 @@ If input-fields is non-nil, get input fields instead."
                (gql-builder--alist-get '(possibleTypes) type-obj))))
     (cond
      (fields
-      (seq-map #'gql-builder--make-field fields))
+      (seq-map (lambda (field)
+                 (gql-builder--make-field field input-fields))
+               fields))
      ((and (null input-fields) possible-types)
       (seq-map #'gql-builder--make-possible-type-field possible-types)))))
 
 ;;;; Building query
 
-(defun gql-builder--get-all-marked-field-paths (ui-state)
-  "Get all the field paths that are marked in UI-STATE.
-
-Return a list of field paths, each field path is like (FIELD-NAME ...),
-eg, (\"A\" \"B\")."
-  (let (results)
-    (pcase-dolist (`(,field-path . ,states) ui-state)
-      (when (alist-get 'marked states)
-        (push field-path results)))
-    results))
-
-(defun gql-builder--get-all-marked-arg-values (ui-state)
-  "Get all the arg values with their field path that are marked in UI-STATE.
-Return a list of (:path FIELD-PATH :arg-val VALUE). Value of :arg-val
-could be nil if the field path is of an input that is an input object."
-  (let (results)
-    (pcase-dolist (`(,field-path . ,states) ui-state)
-      (when (alist-get 'arg-marked states)
-        (push `(:path ,field-path :arg-val ,(alist-get 'arg-val states))
-              results)))
-    results))
-
-(defun gql-builder--construct-query-object (field-paths args root)
-  "Build a JSON object rooted ar ROOT from FIELD-PATHS.
-
-ROOT is a field-path, we want to construct a subgraph rooted at the
-field that ROOT represents.
-
-ARGS is a list of (:path FIELD-PATH :arg-val VAL).
-
-FIELD-PATHS: (\"A\") (\"B\" \"A\") (\"C\" \"A\") (\"D\")
-Return: JSON object that encodes { A: { B: nil, C: nil }, D: nil }
-
-Reuturn a plist (:name FIELD-NAME :fields FIELDS-OF-FIELD :args
-ARGS-OF-FIELD), where FIELDS-OF-FIELD is a list of the above plist.
-ARGS-OF-FIELD is a list of (:name ARG-NAME :fields FIELDS-OF-ARG),
-or (:name ARG-NAME :val ARG-VAL) if the arg is a leaf arg."
-  ;; TODO: Stratify FIELD-PATHS by length.
-  (let* ((root-len (if root (length root) 0))
-         (field-name (car root))
-         (immediate-children
-          (if (eq root-len 0)
-              (seq-filter (lambda (field-path) (eq (length field-path) 1))
-                          field-paths)
-            (seq-filter (lambda (field-path)
-                          (equal (cdr field-path) root))
-                        field-paths)))
-         ;; If there’s no immediate children, SUBGRAPHS would be nil,
-         ;; if there are, SUBGRAPHS will be an alist, where each
-         ;; immediate children is the key, and their subgraph are the
-         ;; values.
-         (subgraphs (mapcar (lambda (child)
-                              (gql-builder--construct-query-object
-                               field-paths args child))
-                            immediate-children))
-         ;; Does this field has args? If it does, construct the arg
-         ;; object.
-         (args-of-this-field (seq-filter (lambda (arg)
-                                           (equal (cdr (plist-get arg :path))
-                                                  root))
-                                         args))
-         (arg-objects (mapcar (lambda (arg)
-                                (gql-builder--construct-args-object
-                                 args arg))
-                              args-of-this-field)))
-    (if field-name
-        (list :name field-name :fields subgraphs :args arg-objects)
-      subgraphs)))
-
-(defun gql-builder--construct-args-object (args root)
-  "Construct a JSON object rooted at ROOT from ARGS.
-
-ROOT has the form (:path FIELD-PATH :arg-val VAL).
-
-Similar to ‘gql-builder--construct-query-object’, this function builds
-a subgraph for ROOT, but for args.
-
-Return (:name ARG-NAME :fields SUBGRAPH), where SUBGRAPH is an alist
-of (:name ARG-NAME :fields SUBGRAPH), or for leaf args, (:name ARG-NAME
-:val ARG-VAL)."
-  (let* ((root-path (plist-get root :path))
-         (root-len (length root-path))
-         (root-arg-name (car root-path))
-         (immediate-children
-          ;; ARG = (:path FIELD-PATH :arg-val VAL)
-          (seq-filter (lambda (arg)
-                        (equal (cdr (plist-get arg :path)) root-path))
-                      args))
-         ;; CHILD = (:path FIELD-PATH :arg-val VAL)
-         (subgraphs (mapcar (lambda (child)
-                              (gql-builder--construct-args-object
-                               args child))
-                            immediate-children)))
-    (if subgraphs
-        (list :name root-arg-name :fields subgraphs)
-      (list :name root-arg-name :val (plist-get root :arg-val)))))
-
-(defun gql-builder--serialize-query-object (query-object &optional indent)
-  "Serialize QUERY-OBJECT to a GraphQL query string.
+(defun gql-builder--serialize-fields (fields &optional indent)
+  "Serialize FIELDS to a GraphQL query string.
 
 If INDENT is non-nil, it should be the indent level, a number, and this
 function will pretty print the query."
-  (let ((indent-string (if indent (make-string (* 2 indent) ?\s) nil)))
+  (let ((indent-string (if indent
+                           (make-string (* gql-builder-indent-steps indent) ?\s)
+                         nil)))
     (string-join
      (mapcar
-      (lambda (child)
-        (let* ((name (plist-get child :name))
-               (sub-fields (plist-get child :fields))
-               (args (plist-get child :args))
+      (lambda (field)
+        (let* ((name (gql-builder-field-name field))
+               (subfields (seq-filter #'gql-builder-field-marked
+                                      (gql-builder-field-subfields field)))
+               (args (seq-filter #'gql-builder-field-marked
+                                 (gql-builder-field-args field)))
                (serialized-args
                 (if args
                     (concat
@@ -442,44 +384,41 @@ function will pretty print the query."
                       ", ")
                      ")")
                   "")))
-          (if sub-fields
+          (if subfields
               (if indent-string
                   (concat indent-string name serialized-args " {\n"
-                          (gql-builder--serialize-query-object
-                           sub-fields (and indent (1+ indent)))
+                          (gql-builder--serialize-fields
+                           subfields (and indent (1+ indent)))
                           indent-string "}\n")
                 (format "%s%s { %s }"
                         name
                         serialized-args
-                        (gql-builder--serialize-query-object
-                         sub-fields)))
+                        (gql-builder--serialize-fields subfields)))
             (if indent-string
                 (concat indent-string name "\n")
               name))))
-      query-object)
+      fields)
      (if indent nil " "))))
 
-(defun gql-builder--serialize-arg-object (arg-object)
-  "Serialize ARG-OBJECT to a GraphQL arg.
-
-ARG-OBJECT should has the form of (:name ARG-NAME :fields ARG-FIELDS)
-or (:name ARG-NAME :val ARG-VAL). ARG-FIELDS has the same form as
-ARG-OBJECT.
-
+(defun gql-builder--serialize-arg (arg)
+  "Serialize ARG (‘gql-builder-field’) to a GraphQL arg.
 Return a string that looks like “NAME: VAL”."
-  (let* ((fields (plist-get arg-object :fields))
-         (serialized-fields (when fields
+  (let* ((subfields (gql-builder-field-subfields arg))
+         (serialized-fields (when subfields
                               (concat "{ "
                                       (string-join
-                                       (mapcar #'gql-builder--serialize-arg-object
-                                               fields)
+                                       (mapcar #'gql-builder--serialize-arg
+                                               subfields)
                                        ", ")
                                       " }")))
-         (val (plist-get arg-object :val)))
-    (format "%s: %s" (plist-get arg-object :name)
+         (val (gql-builder-field-arg-val arg)))
+    (format "%s: %s" (gql-builder-field-name arg)
             (or serialized-fields val "null"))))
 
 ;;;; UI: drawing UI, toggling fields
+
+(defvar gql-builder-indent-steps 2
+  "Number of spaces for each level of indentation.")
 
 (defvar gql-builder-field-map
   (let ((map (make-sparse-keymap)))
@@ -496,29 +435,25 @@ Return a string that looks like “NAME: VAL”."
 ;;   'follow-link t
 ;;   'face nil)
 
-(defun gql-builder--redraw-top-level-field (field-name)
-  "Redraw the section of the top-level field with FIELD-NAME."
+(defun gql-builder--redraw-field (field)
+  "Redraw the section of FIELD (a ‘gql-builder-field’)."
   (let ((orig-pos (point))
-        (schema gql-builder--schema)
         (inhibit-read-only t))
     (goto-char (point-min))
     (when-let ((match (text-property-search-forward
-                       'gql-builder-field-path (list field-name) #'equal )))
+                       'gql-builder-field field #'eq)))
       (goto-char (prop-match-beginning match))
-      ;; Remove child fields.
-      (gql-builder--remove-fields-after-point 0)
-      ;; Remove the field itself.
-      (goto-char (prop-match-beginning match))
-      (let ((beg (pos-bol)))
-        (forward-line 1)
-        (delete-region beg (point)))
-      (gql-builder--insert-fields
-       (list (seq-find (lambda (field)
-                         ;; Field is (Field FIELD-NAME FIELD-TYPE ARGS).
-                         (equal (nth 1 field) field-name))
-                       (gql-builder--get-all-queries schema)))
-       0 nil)
-      (goto-char orig-pos))))
+      (let ((indentation (floor (/ (current-indentation)
+                                   gql-builder-indent-steps))))
+        ;; Remove child fields.
+        (gql-builder--remove-fields-after-point indentation)
+        ;; Remove the field itself.
+        (goto-char (prop-match-beginning match))
+        (let ((beg (pos-bol)))
+          (forward-line 1)
+          (delete-region beg (point)))
+        (gql-builder--insert-fields (list field) indentation)
+        (goto-char orig-pos)))))
 
 (defun gql-builder--render-type (type &optional base)
   "Return a string that represents TYPE.
@@ -539,83 +474,92 @@ Non-null types are rendered as TYPE!. If BASE is non-nil, don’t add the
     (_ (signal 'gql-builder-render-error
                (list "Unexpect shape for a FIELD-TYPE" type)))))
 
-(defun gql-builder--sort-by-marked (fields parent-field-path)
+(defun gql-builder--sort-by-marked (fields)
   "Sort FIELDS by putting marked ones in the front.
-FIELDS and PARENT-FIELD-PATH are the same as in
-‘gql-builder--insert-fields’."
-  (seq-sort (lambda (a b)
-              (let ((a-marked (gql-builder--get-state
-                               (cons (nth 1 a) parent-field-path) 'marked))
-                    (b-marked (gql-builder--get-state
-                               (cons (nth 1 b) parent-field-path) 'marked)))
-                (cond
-                 ((and a-marked (not b-marked)) t)
-                 ((and b-marked (not a-marked)) nil)
-                 (t (string< (nth 1 a) (nth 1 b))))))
-            fields))
 
-(defun gql-builder--insert-fields
-    (fields indent-level parent-field-path &optional arg-p)
+FIELDS is a list of ‘gql-builder-field’s. Sort in-place by setting the
+‘index’ field of each FIELD."
+  (let ((sorted (seq-sort (lambda (a b)
+                            (let ((a-marked (gql-builder-field-marked a))
+                                  (b-marked (gql-builder-field-marked b))
+                                  (a-name (gql-builder-field-name a))
+                                  (b-name (gql-builder-field-name b)))
+                              (cond
+                               ((and a-marked (not b-marked)) t)
+                               ((and b-marked (not a-marked)) nil)
+                               (t (string< a-name b-name)))))
+                          fields)))
+    (cl-loop for idx = 0 then (1+ idx)
+             for field in sorted
+             do (setf (gql-builder-field-index field) idx))))
+
+(defun gql-builder--sort-by-marked-recursive (field)
+  "Sort subfields of FIELD and their subfields too.
+Sort by ‘gql-builder--sort-by-marked’."
+  (let ((subfields (gql-builder-field-subfields field))
+        (args (gql-builder-field-args field)))
+    (when subfields
+      (gql-builder--sort-by-marked subfields)
+      (dolist (subfield subfields)
+        (gql-builder--sort-by-marked-recursive subfield)))
+    (when args
+      (gql-builder--sort-by-marked args)
+      (dolist (arg args)
+        (gql-builder--sort-by-marked-recursive arg)))))
+
+(defun gql-builder--insert-fields (fields indent-level)
   "Insert FIELDS at point.
-Each field in FIELDS should be for the form
 
-    (Field FIELD-NAME FIELD-TYPE ARGS)
-
-INDENT-LEVEL is the nesting level of the fields. PARENT-FIELD-PATH is the
-field path to the parent of fields. It’s used for constructing the field
-path of each field in FIELDS. Specifically, each fields field path
-is (cons FIELD-NAME PARENT-FIELED-PATH).
-
-If ARG-P is non-nil, FIELDS are actually args, insert ARG marker in
-front of each field."
-  (pcase-dolist (`(Field ,name ,type ,args)
-                 (gql-builder--sort-by-marked fields parent-field-path))
-    (let* ((field-path (cons name parent-field-path))
-           (marked (if arg-p
-                       (gql-builder--get-state field-path 'arg-marked)
-                     (gql-builder--get-state field-path 'marked)))
-           (arg-val (and arg-p
-                         (gql-builder--get-state field-path 'arg-val))))
+FIELDS is a list of ‘gql-builder-field’. INDENT-LEVEL is the nesting
+level of the fields."
+  (dolist (field (seq-sort-by #'gql-builder-field-index #'< fields))
+    (pcase-let (((cl-struct gql-builder-field
+                            name type args subfields marked expanded arg-val input)
+                 field))
       (insert (propertize
                (concat
-                (make-string (* 2 indent-level) ?\s)
+                (make-string (* gql-builder-indent-steps indent-level) ?\s)
+                ;; Marker box.
                 (if marked
                     gql-builder-marker-marked
                   gql-builder-marker-unmarked)
-                (if arg-p
+                ;; ARG.
+                (if input
                     (propertize "ARG " 'face 'gql-builder-arg-marker)
                   "")
+                ;; Field name.
                 (propertize (or name "N/A")
                             'face (if marked
                                       'gql-builder-marked-field-name
                                     'gql-builder-field-name))
                 " "
+                ;; Type.
                 (if (string-match-p (rx bol "...") name)
                     ""
                   (propertize (gql-builder--render-type (or type "N/A"))
                               'face 'gql-builder-field-type))
+                ;; Arg val.
                 (if arg-val (gql-builder--format-arg-val arg-val) ""))
-               'gql-builder-field-path field-path
-               'gql-builder-field-name name
-               'gql-builder-field-type type
+               'gql-builder-field field
                'gql-builder-indent-level indent-level
-               'gql-builder-arg-p arg-p
-               'gql-builder-args args
                'keymap gql-builder-field-map)
               "\n")
       ;; Insert subfields if this field is expanded.
-      (when (and gql-builder--schema
-                 (gql-builder--get-state field-path
-                                         (if arg-p 'arg-expanded 'expanded)))
+      (when expanded
         ;; Insert args.
-        (gql-builder--insert-fields args (1+ indent-level) field-path t)
-        ;; Insert subfields.
-        (gql-builder--insert-fields
-         (gql-builder--get-fields-for-type
-          gql-builder--schema
-          (gql-builder--render-type type t) arg-p)
-         (1+ indent-level)
-         field-path arg-p)))))
+        (gql-builder--insert-fields args (1+ indent-level))
+        ;; Insert subfields. We create subfields lazily, so if
+        ;; subfields is nil, maybe we just haven’t created it.
+        (when (and (not subfields) gql-builder--schema)
+          (when-let ((new-subfields (gql-builder--get-fields-for-type
+                                     gql-builder--schema
+                                     (gql-builder--type-name type)
+                                     input)))
+            (setf (gql-builder-field-subfields field)
+                  new-subfields
+                  subfields
+                  new-subfields)))
+        (gql-builder--insert-fields subfields (1+ indent-level))))))
 
 (defun gql-builder--remove-fields-after-point (indent-level)
   "Remove fields after point that has an indent-level higher than INDENT-LEVEL.
@@ -637,43 +581,15 @@ current line satisfies the requirement."
 If FLAG is 1 or -1, expand or collapse regardless of current expansion
 state."
   (interactive)
-  (let* ((inhibit-read-only t)
-         (orig-point (point))
-         (flag (or flag 0))
-         (arg-p (get-text-property (point) 'gql-builder-arg-p))
-         (args (get-text-property (point) 'gql-builder-args))
-         (expanded (gql-builder--get-state-at-point
-                    (if arg-p 'arg-expanded 'expanded)))
-         (indent-level (get-text-property (point) 'gql-builder-indent-level))
-         (field-type (gql-builder--render-type
-                      (get-text-property (point) 'gql-builder-field-type)
-                      t))
-         (field-path (get-text-property (point) 'gql-builder-field-path)))
-    ;; Collapse.
-    (when (or (< flag 0)
-              (and (eq flag 0) expanded))
-      (gql-builder--set-state-at-point (if arg-p 'arg-expanded 'expanded) nil)
-      (when indent-level
-        (gql-builder--remove-fields-after-point indent-level)))
-    ;; Expand.
-    (when (or (> flag 0)
-              (and (eq flag 0) (not expanded)))
-      (gql-builder--set-state-at-point (if arg-p 'arg-expanded 'expanded) t)
-      (when (and indent-level field-path field-type gql-builder--schema)
-        (let ((fields (gql-builder--get-fields-for-type
-                       gql-builder--schema field-type arg-p)))
-          ;; Only show message when this command is called
-          ;; interactively.
-          (when (and (eq flag 0) (null fields))
-            (message "Can’t find any fields for %s" field-type))
-          (forward-line 1)
-          ;; Insert args.
-          (gql-builder--insert-fields
-           args (1+ indent-level) field-path t)
-          ;; Insert fields, if this field is an arg, then its fielld
-          ;; must be args too.
-          (gql-builder--insert-fields
-           fields (1+ indent-level) field-path arg-p))))
+  (let* ((orig-point (point))
+         (field (get-text-property (point) 'gql-builder-field))
+         (expanded (gql-builder-field-expanded field)))
+    (setf (gql-builder-field-expanded field)
+          (not expanded))
+    (gql-builder--redraw-field field)
+    (when (and (not expanded)
+               (null (gql-builder-field-subfields field)))
+      (message "Can’t find any fields for %s" (gql-builder-field-name field)))
     (goto-char orig-point)))
 
 ;; If a field is marked, it will be included in the final query that
@@ -682,54 +598,26 @@ state."
 (defun gql-builder-mark ()
   "Mark the field at point."
   (interactive)
-  (let* ((arg-p (get-text-property (point) 'gql-builder-arg-p))
-         (marked (gql-builder--get-state-at-point
-                  (if arg-p 'arg-marked 'marked)))
-         (inhibit-read-only t)
-         (props nil)
-         (orig-pos (point)))
+  (let* ((orig-point (point))
+         (field (get-text-property (point) 'gql-builder-field))
+         (marked (gql-builder-field-marked field)))
     (when (not marked)
-      (gql-builder--set-state-at-point (if arg-p 'arg-marked 'marked) t)
-      (forward-line 0)
-      (setq props (text-properties-at (point)))
-      (when (search-forward gql-builder-marker-unmarked nil t)
-        (replace-match (apply #'propertize gql-builder-marker-marked
-                              props)))
-      (when-let ((match (text-property-search-forward
-                         'face 'gql-builder-field-name #'eq)))
-        (put-text-property (prop-match-beginning match)
-                           (prop-match-end match)
-                           'face 'gql-builder-marked-field-name)))
-    (gql-builder-toggle-expanded 1)
-    (goto-char orig-pos))
+      (setf (gql-builder-field-marked field) t
+            (gql-builder-field-expanded field) t)
+      (gql-builder--redraw-field field)
+      (goto-char orig-point)))
   (forward-line 1))
 
 (defun gql-builder-unmark ()
   "Unmark the field at point."
   (interactive)
-  (save-excursion
-    (let* ((arg-p (get-text-property (point) 'gql-builder-arg-p))
-           (marked (gql-builder--get-state-at-point
-                    (if arg-p 'arg-marked 'marked)))
-           (inhibit-read-only t)
-           (props nil))
-      (when marked
-        (gql-builder--set-state-at-point (if arg-p 'arg-marked 'marked) nil)
-        (when arg-p
-          (gql-builder--set-state-at-point 'arg-val nil))
-        (forward-line 0)
-        (setq props (text-properties-at (point)))
-        (when (search-forward gql-builder-marker-marked nil t)
-          (replace-match (apply #'propertize gql-builder-marker-unmarked
-                                props)))
-        (when-let ((match (text-property-search-forward
-                           'face 'gql-builder-marked-field-name #'eq)))
-          (put-text-property (prop-match-beginning match)
-                             (prop-match-end match)
-                             'face 'gql-builder-field-name))
-        (when-let ((match (text-property-search-forward
-                           'face 'gql-builder-field-type #'eq)))
-          (delete-region (prop-match-end match) (pos-eol))))))
+  (let* ((orig-point (point))
+         (field (get-text-property (point) 'gql-builder-field))
+         (marked (gql-builder-field-marked field)))
+    (when marked
+      (setf (gql-builder-field-marked field) nil)
+      (gql-builder--redraw-field field)
+      (goto-char orig-point)))
   (forward-line 1))
 
 (defsubst gql-builder--format-arg-val (val)
@@ -740,29 +628,24 @@ VAL can be a string, a number, t, or :false."
 (defun gql-builder-set-arg ()
   "Set the value for the arg at point."
   (interactive)
-  (save-excursion
-    (let* ((arg-p (get-text-property (point) 'gql-builder-arg-p))
-           (type (get-text-property (point) 'gql-builder-field-type))
-           (inhibit-read-only t)
-           (props nil)
-           (old-val (gql-builder--get-state-at-point 'arg-val)))
-      (when arg-p
-        (if (not (string-match-p (rx bos
-                                     (or "String" "Int" "Boolean" "Float" "ID")
-                                     (* "!")
-                                     eos)
-                                 (gql-builder--render-type type)))
-            (message "Editing array arg is not supported: %s"
-                     (gql-builder--render-type type))
-          (let* ((val (read-string "Value: " old-val)))
-            (gql-builder--set-state-at-point 'arg-val val)
-            (forward-line 0)
-            (setq props (text-properties-at (point)))
-            (when-let ((match (text-property-search-forward
-                               'face 'gql-builder-field-type #'eq)))
-              (delete-region (prop-match-end match) (pos-eol))
-              (insert (apply #'propertize (gql-builder--format-arg-val val)
-                             props)))))))))
+  (let* ((orig-point (point))
+         (field (get-text-property (point) 'gql-builder-field))
+         (old-val (gql-builder-field-arg-val field))
+         (arg-p (gql-builder-field-input field)))
+    (when arg-p
+      (if (not (string-match-p (rx bos
+                                   (or "String" "Int" "Boolean" "Float" "ID")
+                                   (* "!")
+                                   eos)
+                               (gql-builder--render-type type)))
+          (message "Editing array arg is not supported: %s"
+                   (gql-builder--render-type type))
+        (let ((val (read-string "Value: " old-val)))
+          (setf (gql-builder-field-arg-val field)
+                (not (gql-builder-field-marked field))
+                (gql-builder-field-marked field) t)
+          (gql-builder--redraw-field field)
+          (goto-char orig-point))))))
 
 (defun gql-builder-toggle-marked-all ()
   "Mark/unmark all the fields under this field."
@@ -803,7 +686,10 @@ looks like ((\"Content-Type\" . \"application/json\"))."
           (erase-buffer)
           (save-excursion
             (gql-builder--insert-fields
-             (gql-builder--get-all-queries gql-builder--schema) 0 nil)))
+             (or gql-builder--fields
+                 (setq gql-builder--fields
+                       (gql-builder--get-all-queries gql-builder--schema)))
+             0)))
       (plz-http-error
        (erase-buffer)
        (insert "Can’t retrieve schema from " url ":\n")
@@ -812,8 +698,13 @@ looks like ((\"Content-Type\" . \"application/json\"))."
 (defun gql-builder-refresh ()
   "Refresh schema and buffer."
   (interactive)
+  ;; TODO keep ui state.
   (setq gql-builder--schema
         (gql-builder--get-schema gql-builder--endpoint nil t))
+  (let ((new-fields (gql-builder--get-all-queries gql-builder--schema))
+        (old-fields gql-builder--fields))
+    (gql-builder--rebuild-fields old-fields new-fields)
+    (setq gql-builder--fields new-fields))
   (gql-builder-reorder))
 
 (defun gql-builder-clear-schema-cache ()
@@ -827,23 +718,17 @@ looks like ((\"Content-Type\" . \"application/json\"))."
   (let ((inhibit-read-only t)
         (orig-point (point)))
     (erase-buffer)
-    (if (null gql-builder--schema)
-        (insert "Can’t retrieve schema from " url "\n")
-      (gql-builder--insert-fields
-       (gql-builder--get-all-queries gql-builder--schema) 0 nil))
+    (dolist (field gql-builder--fields)
+      (gql-builder--sort-by-marked-recursive field))
+    (gql-builder--insert-fields gql-builder--fields 0)
     (goto-char (min orig-point (point-max)))))
 
 (defun gql-builder-show-query ()
   "Show the GraphQL query this builder will generate."
   (interactive)
-  (let ((inner-query (gql-builder--serialize-query-object
-                      (gql-builder--construct-query-object
-                       (gql-builder--get-all-marked-field-paths
-                        gql-builder--ui-state)
-                       (gql-builder--get-all-marked-arg-values
-                        gql-builder--ui-state)
-                       nil)
-                      0)))
+  (let* ((marked-fields (seq-filter #'gql-builder-field-marked
+                                    gql-builder--fields))
+         (inner-query (gql-builder--serialize-fields marked-fields 0)))
     (pop-to-buffer "*gql-builder show query*")
     (let ((inhibit-read-only t))
       (erase-buffer)
@@ -868,7 +753,7 @@ looks like ((\"Content-Type\" . \"application/json\"))."
   "Location of the data store.")
 
 (defvar gql-builder--data-store nil
-  "Maps GraphQL query string to the UI-state for the query builder.
+  "Maps GraphQL query string to the fields state for the query builder.
 The value is an alist mapping (ENDPOINT-URL QUERY-STRING) to UI
 states. QUERY-STRING doesn’t have trailing whitespace/newline.")
 
@@ -880,7 +765,7 @@ states. QUERY-STRING doesn’t have trailing whitespace/newline.")
       (goto-char (point-min))
       (setq gql-builder--data-store (read (current-buffer))))))
 
-(defun gql-builder--save-ui-state ()
+(defun gql-builder--save-fields ()
   "Save the current UI state to query cache."
   (unless gql-builder--endpoint
     (signal 'gql-builder-error '("Current buffer doesn’t have a saved GraphQL endpoint (‘gql-builder--endpoint’)")))
@@ -889,7 +774,7 @@ states. QUERY-STRING doesn’t have trailing whitespace/newline.")
 
   (setf (alist-get (list gql-builder--endpoint gql-builder--initial-body)
                    gql-builder--data-store nil t #'equal)
-        gql-builder--ui-state))
+        gql-builder--fields))
 
 (defun gql-builder--save-data-store ()
   "Save cached queries into data store file."
@@ -931,13 +816,13 @@ This function is supposed to be called by
                                               (cons 'buffer buf)
                                               (cons 'point pos)))
     (when (and unsubstituted-body (not (equal unsubstituted-body "")))
-      (let ((ui-state (alist-get (list url (string-trim unsubstituted-body))
-                                 gql-builder--data-store
-                                 nil t #'equal)))
+      (let ((fields (alist-get (list url (string-trim unsubstituted-body))
+                               gql-builder--data-store
+                               nil t #'equal)))
         (setq gql-builder--initial-body (string-trim unsubstituted-body))
-        (if (null ui-state)
+        (if (null fields)
             (message "Can’t resume the query, query builder can only resume query built by itself, it can’t parse an existing query")
-          (setq gql-builder--ui-state ui-state)
+          (setq gql-builder--fields fields)
           (gql-builder-reorder))))))
 
 (defun restclient-gql-builder ()
@@ -955,19 +840,12 @@ And quit the query builder."
          (buffer (alist-get 'buffer gql-builder--restclient-state))
          (pos (alist-get 'point gql-builder--restclient-state))
          (query (concat "{\n"
-                        (gql-builder--serialize-query-object
-                         (gql-builder--construct-query-object
-                          (gql-builder--get-all-marked-field-paths
-                           gql-builder--ui-state)
-                          (gql-builder--get-all-marked-arg-values
-                           gql-builder--ui-state)
-                          nil)
-                         1)
+                        (gql-builder--serialize-fields gql-builder--fields 1)
                         "}"))
          (new-body query))
     (setf (alist-get (list gql-builder--endpoint (string-trim new-body))
                      gql-builder--data-store nil t #'equal)
-          gql-builder--ui-state)
+          gql-builder--fields)
     (gql-builder--save-data-store)
     (when buffer
       (with-current-buffer buffer
@@ -994,7 +872,8 @@ And quit the query builder."
                 (progn
                   (goto-char (restclient-current-max))
                   (insert new-body "\n"))
-              (signal 'gql-builder-error '("Can’t find the original request body"))))))))
+              (signal 'gql-builder-error
+                      '("Can’t find the original request body"))))))))
 
   (when gql-builder--orig-window-config
     (set-window-configuration gql-builder--orig-window-config)))
