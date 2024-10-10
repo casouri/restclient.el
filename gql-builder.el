@@ -380,7 +380,7 @@ function will pretty print the query."
                     (concat
                      "("
                      (string-join
-                      (mapcar #'gql-builder--serialize-arg-object args)
+                      (mapcar #'gql-builder--serialize-arg args)
                       ", ")
                      ")")
                   "")))
@@ -404,11 +404,12 @@ function will pretty print the query."
   "Serialize ARG (‘gql-builder-field’) to a GraphQL arg.
 Return a string that looks like “NAME: VAL”."
   (let* ((subfields (gql-builder-field-subfields arg))
-         (serialized-fields (when subfields
+         (marked-subfields (seq-filter #'gql-builder-field-marked subfields))
+         (serialized-fields (when marked-subfields
                               (concat "{ "
                                       (string-join
                                        (mapcar #'gql-builder--serialize-arg
-                                               subfields)
+                                               marked-subfields)
                                        ", ")
                                       " }")))
          (val (gql-builder-field-arg-val arg)))
@@ -493,19 +494,16 @@ FIELDS is a list of ‘gql-builder-field’s. Sort in-place by setting the
              for field in sorted
              do (setf (gql-builder-field-index field) idx))))
 
-(defun gql-builder--sort-by-marked-recursive (field)
-  "Sort subfields of FIELD and their subfields too.
+(defun gql-builder--sort-by-marked-recursive (fields)
+  "Sort subfields of each field in FIELDS and their subfields too.
 Sort by ‘gql-builder--sort-by-marked’."
-  (let ((subfields (gql-builder-field-subfields field))
-        (args (gql-builder-field-args field)))
-    (when subfields
-      (gql-builder--sort-by-marked subfields)
-      (dolist (subfield subfields)
-        (gql-builder--sort-by-marked-recursive subfield)))
-    (when args
-      (gql-builder--sort-by-marked args)
-      (dolist (arg args)
-        (gql-builder--sort-by-marked-recursive arg)))))
+  (gql-builder--sort-by-marked fields)
+  (dolist (field fields)
+    (let ((subfields (gql-builder-field-subfields field))
+          (args (gql-builder-field-args field)))
+      (gql-builder--sort-by-marked-recursive subfields)
+      (when args
+        (gql-builder--sort-by-marked-recursive args)))))
 
 (defun gql-builder--insert-fields (fields indent-level)
   "Insert FIELDS at point.
@@ -630,6 +628,7 @@ VAL can be a string, a number, t, or :false."
   (interactive)
   (let* ((orig-point (point))
          (field (get-text-property (point) 'gql-builder-field))
+         (type (gql-builder-field-type field))
          (old-val (gql-builder-field-arg-val field))
          (arg-p (gql-builder-field-input field)))
     (when arg-p
@@ -641,11 +640,11 @@ VAL can be a string, a number, t, or :false."
           (message "Editing array arg is not supported: %s"
                    (gql-builder--render-type type))
         (let ((val (read-string "Value: " old-val)))
-          (setf (gql-builder-field-arg-val field)
-                (not (gql-builder-field-marked field))
+          (setf (gql-builder-field-arg-val field) val
                 (gql-builder-field-marked field) t)
           (gql-builder--redraw-field field)
-          (goto-char orig-point))))))
+          (goto-char orig-point)))
+      (forward-line 1))))
 
 (defun gql-builder-toggle-marked-all ()
   "Mark/unmark all the fields under this field."
@@ -718,8 +717,7 @@ looks like ((\"Content-Type\" . \"application/json\"))."
   (let ((inhibit-read-only t)
         (orig-point (point)))
     (erase-buffer)
-    (dolist (field gql-builder--fields)
-      (gql-builder--sort-by-marked-recursive field))
+    (gql-builder--sort-by-marked-recursive gql-builder--fields)
     (gql-builder--insert-fields gql-builder--fields 0)
     (goto-char (min orig-point (point-max)))))
 
@@ -839,8 +837,10 @@ And quit the query builder."
   (let* ((body (alist-get 'body gql-builder--restclient-state))
          (buffer (alist-get 'buffer gql-builder--restclient-state))
          (pos (alist-get 'point gql-builder--restclient-state))
+         (marked-fields (seq-filter #'gql-builder-field-marked
+                                    gql-builder--fields))
          (query (concat "{\n"
-                        (gql-builder--serialize-fields gql-builder--fields 1)
+                        (gql-builder--serialize-fields marked-fields 1)
                         "}"))
          (new-body query))
     (setf (alist-get (list gql-builder--endpoint (string-trim new-body))
