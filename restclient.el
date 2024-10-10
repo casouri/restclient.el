@@ -622,7 +622,7 @@ bound to C-c C-r."
   (interactive)
   (restclient-http-parse-current-and-do
    '(lambda (method url headers entity)
-      (let* ((method (restclient-gql-convert-method method))
+      (let* ((converted-method (restclient-gql-convert-method method))
              (header-args
               (apply 'append
                      (mapcar (lambda (header)
@@ -632,7 +632,7 @@ bound to C-c C-r."
                           (mapconcat 'shell-quote-argument
                                      (append '("-i")
                                              header-args
-                                             (list (concat "-X" method))
+                                             (list (concat "-X" converted-method))
                                              (list url)
                                              (when (> (string-width entity) 0)
                                                (list "-d" (restclient-gql-convert-body method entity))))
