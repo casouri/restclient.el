@@ -139,7 +139,10 @@ enum, a union, or an interface."
   (args nil :type (list gql-builder-field) :documentation
         "Arguments of a query. A list of input fields.")
   (subfields nil :type (list gql-builder-field) :documentation
-             "Subfields of this field.")
+             "Subfields of this field.
+BEWARE! we load subfields lazily, so subfields being nil doesn’t mean
+the field doesn’t have subfields. But if it’s expanded and subfield is
+still nil, then it means this field doesn’t have subfields.")
   (input-p nil :type boolean :documentation
            "If non-nil, this field is an input field (aka arg).")
   (expanded nil :type boolean :documentation
@@ -156,8 +159,8 @@ enum, a union, or an interface."
 (defvar-local gql-builder--fields '()
   "Field date for the current builder buffer. A list of ‘gql-builder-field’s.")
 
-(defun gql-builder--rebuild-fields (old-fields new-fields)
-  "Populate NEW-FIELDS with data from OLD-FIELDS.
+(defun gql-builder--rebuild-fields (old-fields new-fields schema)
+  "Populate NEW-FIELDS with data from OLD-FIELDS using SCHEMA.
 
 Specifically, copy the value of ‘expanded’, ‘marked’, ‘arg-val’, and
 ‘index’."
@@ -168,21 +171,27 @@ Specifically, copy the value of ‘expanded’, ‘marked’, ‘arg-val’, and
                               (equal new-name
                                      (gql-builder-field-name old-field)))
                             old-fields)))
+      (setf (gql-builder-field-expanded new-field)
+            (gql-builder-field-expanded old-field)
 
-      (pcase-let (((cl-struct gql-builder-field
-                              name type args subfields marked expanded arg-val)
-                   ))
-        (setf (gql-builder-field-expanded new-field)
-              (gql-builder-field-expanded old-field)
+            (gql-builder-field-marked new-field)
+            (gql-builder-field-marked old-field)
 
-              (gql-builder-field-marked new-field)
-              (gql-builder-field-marked old-field)
+            (gql-builder-field-arg-val new-field)
+            (gql-builder-field-arg-val old-field)
 
-              (gql-builder-field-arg-val new-field)
-              (gql-builder-field-arg-val old-field)
+            (gql-builder-field-index new-field)
+            (gql-builder-field-index old-field))
 
-              (gql-builder-field-index new-field)
-              (gql-builder-field-index old-field))))))
+      (let ((new-subfields (gql-builder-field-subfields new-field))
+            (old-subfields (gql-builder-field-subfields old-field))
+            (new-args (gql-builder-field-args new-field))
+            (old-args (gql-builder-field-args old-field)))
+        (when (or old-subfields new-subfields)
+          (setq new-subfields (gql-builder--load-subfields new-field schema))
+          (gql-builder--rebuild-fields old-subfields new-subfields schema))
+        (when new-args
+          (gql-builder--rebuild-fields old-args new-args schema))))))
 
 (defmacro gql-builder--get-state-at-point (key)
   "Return the field state for KEY of the field at point.
@@ -356,6 +365,18 @@ If input-fields is non-nil, get input fields instead."
                fields))
      ((and (null input-fields) possible-types)
       (seq-map #'gql-builder--make-possible-type-field possible-types)))))
+
+(defun gql-builder--load-subfields (field schema)
+  "Load subfields of FIELD from SCHEMA.
+Return the loaded subfields. If FIELD already have subfields, just
+return them."
+  (pcase-let (((cl-struct gql-builder-field type subfields input-p) field))
+    (or subfields
+        (when-let ((new-subfields (gql-builder--get-fields-for-type
+                                   schema
+                                   (gql-builder--type-name type)
+                                   input-p)))
+          (setf (gql-builder-field-subfields field) new-subfields)))))
 
 ;;;; Building query
 
@@ -548,15 +569,7 @@ level of the fields."
         (gql-builder--insert-fields args (1+ indent-level))
         ;; Insert subfields. We create subfields lazily, so if
         ;; subfields is nil, maybe we just haven’t created it.
-        (when (and (not subfields) gql-builder--schema)
-          (when-let ((new-subfields (gql-builder--get-fields-for-type
-                                     gql-builder--schema
-                                     (gql-builder--type-name type)
-                                     input-p)))
-            (setf (gql-builder-field-subfields field)
-                  new-subfields
-                  subfields
-                  new-subfields)))
+        (setq subfields (gql-builder--load-subfields field gql-builder--schema))
         (gql-builder--insert-fields subfields (1+ indent-level))))))
 
 (defun gql-builder--remove-fields-after-point (indent-level)
@@ -702,7 +715,7 @@ looks like ((\"Content-Type\" . \"application/json\"))."
         (gql-builder--get-schema gql-builder--endpoint nil t))
   (let ((new-fields (gql-builder--get-all-queries gql-builder--schema))
         (old-fields gql-builder--fields))
-    (gql-builder--rebuild-fields old-fields new-fields)
+    (gql-builder--rebuild-fields old-fields new-fields gql-builder--schema)
     (setq gql-builder--fields new-fields))
   (gql-builder-reorder))
 
