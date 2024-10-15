@@ -143,6 +143,9 @@ enum, a union, or an interface."
 BEWARE! we load subfields lazily, so subfields being nil doesn’t mean
 the field doesn’t have subfields. But if it’s expanded and subfield is
 still nil, then it means this field doesn’t have subfields.")
+  (mutation-p nil :type boolean :documentation
+              "If non-nil, this is a mutation rather than a query.
+Only makes sense for top-level fields.")
   (input-p nil :type boolean :documentation
            "If non-nil, this field is an input field (aka arg).")
   (expanded nil :type boolean :documentation
@@ -154,10 +157,42 @@ still nil, then it means this field doesn’t have subfields.")
   (index 0 :type number :documentation
          "The index of this field among its siblings, used for display."))
 
+;; Default printer doesn’t support versioning, so we convert fields
+;; into JSON for serialization.
+(defun gql-builder--serialize-field (field)
+  "Serialize FIELD (a ‘gql-builder-field’) into a plist."
+  (pcase-let (((cl-struct gql-builder-field
+                          name type args subfields input-p
+                          expanded marked arg-val index)
+               field))
+    (list :name name :type (prin1-to-string type)
+          :args (apply #'vector (mapcar #'gql-builder--serialize-field args))
+          :subfields (apply #'vector
+                            (mapcar #'gql-builder--serialize-field subfields))
+          :input-p input-p :expanded expanded :marked marked :arg-val arg-val
+          :index index
+          :version "2")))
+
+(defun gql-builder--deserialize-field (json-field)
+  "Deserialize JSON-FIELD into a ‘gql-builder-field’."
+  (make-gql-builder-field
+   :name (plist-get json-field :name)
+   :type (read (plist-get json-field :type))
+   :args (seq-map #'gql-builder--deserialize-field
+                  (plist-get json-field :args))
+   :subfields (seq-map #'gql-builder--deserialize-field
+                       (plist-get json-field :subfields))
+   :input-p (plist-get json-field :input-p)
+   :expanded (plist-get json-field :expanded)
+   :marked (plist-get json-field :marked)
+   :arg-val (plist-get json-field :arg-val)
+   :index (plist-get json-field :index)
+   :mutation-p (plist-get json-field :mutation-p)))
+
 ;;;; UI state
 
 (defvar-local gql-builder--fields '()
-  "Field date for the current builder buffer. A list of ‘gql-builder-field’s.")
+  "Field data for the current builder buffer. A list of ‘gql-builder-field’s.")
 
 (defun gql-builder--rebuild-fields (old-fields new-fields schema)
   "Populate NEW-FIELDS with data from OLD-FIELDS using SCHEMA.
@@ -303,14 +338,20 @@ If NEW is non-nil, skip the schema cache and always get from remote."
               schema)
         schema)))
 
-(defun gql-builder--get-all-queries (schema)
+(defun gql-builder--get-all-queries-and-mutations (schema)
   "Get the list of queries in SCHEMA.
 
 SCHEMA is a JSON object returned from ‘queery-builder--get-schema’.
 Return a list of ‘gql-builder-field’s."
-  (let ((query-type-name
-         (gql-builder--alist-get '(data __schema queryType name) schema)))
-    (gql-builder--get-fields-for-type schema query-type-name)))
+  (let* ((query-type-name
+          (gql-builder--alist-get '(data __schema queryType name) schema))
+         (mutation-type-name
+          (gql-builder--alist-get '(data __schema mutationType name) schema))
+         (queries (gql-builder--get-fields-for-type schema query-type-name))
+         (mutations (gql-builder--get-fields-for-type schema mutation-type-name)))
+    (dolist (mutation mutations)
+      (setf (gql-builder-field-mutation-p mutation) t))
+    (append queries mutations)))
 
 (defun gql-builder--make-field (field &optional input-field)
   "Create a ‘gql-builder-field’ from FIELD using SCHEMA.
@@ -672,7 +713,7 @@ VAL can be a string, a number, t, or :false."
     (define-key map (kbd "r") #'gql-builder-reorder)
     (define-key map (kbd "C-c C-c") #'gql-builder-save-and-quit)
     (define-key map (kbd "v") #'gql-builder-set-arg)
-    (define-key map (kbd "E") #'gql-builder-show-query)
+    (define-key map (kbd "E") #'gql-builder-show-query-and-mutation)
     map)
   "Mode map for ‘gql-builder-mode’.")
 
@@ -700,7 +741,8 @@ looks like ((\"Content-Type\" . \"application/json\"))."
             (gql-builder--insert-fields
              (or gql-builder--fields
                  (setq gql-builder--fields
-                       (gql-builder--get-all-queries gql-builder--schema)))
+                       (gql-builder--get-all-queries-and-mutations
+                        gql-builder--schema)))
              0)))
       (plz-http-error
        (erase-buffer)
@@ -713,7 +755,8 @@ looks like ((\"Content-Type\" . \"application/json\"))."
   ;; TODO keep ui state.
   (setq gql-builder--schema
         (gql-builder--get-schema gql-builder--endpoint nil t))
-  (let ((new-fields (gql-builder--get-all-queries gql-builder--schema))
+  (let ((new-fields (gql-builder--get-all-queries-and-mutations
+                     gql-builder--schema))
         (old-fields gql-builder--fields))
     (gql-builder--rebuild-fields old-fields new-fields gql-builder--schema)
     (setq gql-builder--fields new-fields))
@@ -728,22 +771,35 @@ looks like ((\"Content-Type\" . \"application/json\"))."
   "Reorder fields so marked ones come first."
   (interactive)
   (let ((inhibit-read-only t)
-        (orig-point (point)))
+        (orig-point (point))
+        (queries (cl-remove-if #'gql-builder-field-mutation-p
+                               gql-builder--fields))
+        (mutations (cl-remove-if-not #'gql-builder-field-mutation-p
+                                     gql-builder--fields)))
     (erase-buffer)
-    (gql-builder--sort-by-marked-recursive gql-builder--fields)
-    (gql-builder--insert-fields gql-builder--fields 0)
+    (gql-builder--sort-by-marked-recursive queries)
+    (gql-builder--sort-by-marked-recursive mutations)
+    (insert "Queries:\n\n")
+    (gql-builder--insert-fields queries 0)
+    (insert "\nMutations:\n\n")
+    (gql-builder--insert-fields mutations 0)
     (goto-char (min orig-point (point-max)))))
 
-(defun gql-builder-show-query ()
+(defun gql-builder-show-query-and-mutation ()
   "Show the GraphQL query this builder will generate."
   (interactive)
-  (let* ((marked-fields (seq-filter #'gql-builder-field-marked
-                                    gql-builder--fields))
-         (inner-query (gql-builder--serialize-fields marked-fields 0)))
-    (pop-to-buffer "*gql-builder show query*")
+  (let* ((query-fields (seq-filter #'gql-builder-field-marked
+                                   (cl-remove-if #'gql-builder-field-mutation-p
+                                                 gql-builder--fields)))
+         (mutation-fields (seq-filter #'gql-builder-field-marked
+                                      (seq-filter #'gql-builder-field-mutation-p
+                                                  gql-builder--fields)))
+         (inner-query (gql-builder--serialize-fields query-fields 0))
+         (inner-mutation (gql-builder--serialize-fields mutation-fields 0)))
+    (pop-to-buffer "*gql-builder show query and mutation*")
     (let ((inhibit-read-only t))
       (erase-buffer)
-      (insert inner-query)
+      (insert inner-query inner-mutation)
       (goto-char (point-min))
       (insert "  ")
       (while (eq 0 (forward-line 1))
@@ -766,7 +822,8 @@ looks like ((\"Content-Type\" . \"application/json\"))."
 (defvar gql-builder--data-store nil
   "Maps GraphQL query string to the fields state for the query builder.
 The value is an alist mapping (ENDPOINT-URL QUERY-STRING) to UI
-states. QUERY-STRING doesn’t have trailing whitespace/newline.")
+states (list of ‘gql-builder-field’s). QUERY-STRING doesn’t have
+trailing whitespace/newline.")
 
 (defun gql-builder--load-data-store ()
   "Load cached queries form data store file."
@@ -774,7 +831,14 @@ states. QUERY-STRING doesn’t have trailing whitespace/newline.")
     (with-temp-buffer
       (insert-file-contents gql-builder--data-store-location)
       (goto-char (point-min))
-      (setq gql-builder--data-store (read (current-buffer))))))
+      (setq gql-builder--data-store
+            (mapcar (lambda (entry)
+                      (cons (plist-get entry :key)
+                            (mapcar #'gql-builder--deserialize-field
+                                    (plist-get entry :fields))))
+                    (json-parse-buffer :object-type 'plist
+                                       :array-type 'list
+                                       :false-object nil))))))
 
 (defun gql-builder--save-fields ()
   "Save the current UI state to query cache."
@@ -850,10 +914,15 @@ And quit the query builder."
   (let* ((body (alist-get 'body gql-builder--restclient-state))
          (buffer (alist-get 'buffer gql-builder--restclient-state))
          (pos (alist-get 'point gql-builder--restclient-state))
-         (marked-fields (seq-filter #'gql-builder-field-marked
-                                    gql-builder--fields))
-         (query (concat "{\n"
-                        (gql-builder--serialize-fields marked-fields 1)
+         (query-fields (seq-filter #'gql-builder-field-marked
+                                   (cl-remove-if #'gql-builder-field-mutation-p
+                                                 gql-builder--fields)))
+         (muation-fields (seq-filter #'gql-builder-field-marked
+                                     (seq-filter #'gql-builder-field-mutation-p
+                                                 gql-builder--fields)))
+         (query (concat (if query-fields "{\n" "mutation {\n")
+                        (gql-builder--serialize-fields
+                         (or query-fields muation-fields) 1)
                         "}"))
          (new-body query))
     (setf (alist-get (list gql-builder--endpoint (string-trim new-body))
