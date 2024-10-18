@@ -457,8 +457,8 @@ function will pretty print the query."
                         serialized-args
                         (gql-builder--serialize-fields subfields)))
             (if indent-string
-                (concat indent-string name "\n")
-              name))))
+                (concat indent-string name serialized-args "\n")
+              (concat name serialized-args)))))
       fields)
      (if indent nil " "))))
 
