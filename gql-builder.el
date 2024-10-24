@@ -736,14 +736,11 @@ looks like ((\"Content-Type\" . \"application/json\"))."
           (unless gql-builder--schema
             (setq gql-builder--schema (gql-builder--get-schema url headers)))
           (setq gql-builder--endpoint url)
-          (erase-buffer)
-          (save-excursion
-            (gql-builder--insert-fields
-             (or gql-builder--fields
-                 (setq gql-builder--fields
-                       (gql-builder--get-all-queries-and-mutations
-                        gql-builder--schema)))
-             0)))
+          (setq gql-builder--fields
+                (or gql-builder--fields
+                    (gql-builder--get-all-queries-and-mutations
+                     gql-builder--schema)))
+          (gql-builder-reorder))
       (plz-http-error
        (erase-buffer)
        (insert "Can’t retrieve schema from " url ":\n")
@@ -858,7 +855,18 @@ trailing whitespace/newline.")
       (unless (file-exists-p dir)
         (mkdir dir t)))
     (with-temp-buffer
-      (print gql-builder--data-store (current-buffer))
+      (insert
+       (json-serialize
+        (apply #'vector
+               (mapcar
+                (lambda (entry)
+                  (list :key (apply #'vector (car entry))
+                        :fields
+                        (apply #'vector
+                               (mapcar #'gql-builder--serialize-field
+                                       (cdr entry)))))
+                gql-builder--data-store))
+        :false-object nil))
       (write-region (point-min) (point-max) gql-builder--data-store-location))))
 
 (defun gql-builder--restclient-show-gql-builder
@@ -941,7 +949,8 @@ And quit the query builder."
                         '("Can’t find the original request header"))
               (forward-line)
               (while (or (looking-at restclient-response-hook-regexp)
-                         (and (looking-at restclient-header-regexp) (not (looking-at restclient-empty-line-regexp)))
+                         (and (looking-at restclient-header-regexp)
+                              (not (looking-at restclient-empty-line-regexp)))
                          (looking-at restclient-use-var-regexp))
                 (forward-line))
               (insert "\n" new-body))
