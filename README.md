@@ -10,7 +10,7 @@ Changes I made:
 - Add GraphQL support, GraphQL requests looks like this:
 
 ```
-GQL :mgql_dev
+GQL https://gql-endpoint.com/graphql
 Content-Type: application/json
 
 query blah {
@@ -24,6 +24,37 @@ query blah {
   "var1": "abc"
 }
 ```
+
+Most of the time, restclient variables should be enough:
+
+```
+
+:restclient_var=abc
+
+GQL https://gql-endpoint.com/graphql
+Content-Type: application/json
+
+query blah {
+  fields(var: ":restclient_var") {
+    subfields
+    subfields
+  }
+}
+```
+
+- In a GQL request, press `C-c C-e` to pop up a GraphQL builder, in
+  which you can explore the schema and build a GraphQL query.
+
+  Use `m` to mark a field, `u` to unmark a field, `TAB` to fold/unfold
+  a field, and `v` to set the value for a variable. Once you’re happy
+  with the query, press `C-c` to save and go back to restclient, or
+  press `E` to export the query.
+
+  Note that this builder _can’t parse existing GraphQL queries_, you
+  have to build a query from scratch. However, once you’ve built a
+  query, you can go back and edit it in the builder and don’t have to
+  build from scratch again.
+
 
 # Below are original README
 
