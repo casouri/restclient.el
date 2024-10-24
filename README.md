@@ -9,38 +9,38 @@ Changes I made:
 
 - Add GraphQL support, GraphQL requests looks like this:
 
-```
-GQL https://gql-endpoint.com/graphql
-Content-Type: application/json
+  ```
+  GQL https://gql-endpoint.com/graphql
+  Content-Type: application/json
 
-query blah {
-  fields {
-    subfields
-    subfields
+  query blah {
+    fields {
+      subfields
+      subfields
+    }
   }
-}
-=-=
-{
-  "var1": "abc"
-}
-```
-
-Most of the time, restclient variables should be enough:
-
-```
-
-:restclient_var=abc
-
-GQL https://gql-endpoint.com/graphql
-Content-Type: application/json
-
-query blah {
-  fields(var: ":restclient_var") {
-    subfields
-    subfields
+  =-=
+  {
+    "var1": "abc"
   }
-}
-```
+  ```
+
+  Most of the time, restclient variables should be enough:
+
+  ```
+
+  :restclient_var=abc
+
+  GQL https://gql-endpoint.com/graphql
+  Content-Type: application/json
+
+  query blah {
+    fields(var: ":restclient_var") {
+      subfields
+      subfields
+    }
+  }
+  ```
 
 - In a GQL request, press `C-c C-e` to pop up a GraphQL builder, in
   which you can explore the schema and build a GraphQL query.
