@@ -27,6 +27,7 @@
       (require 'cl)
     (require 'cl-lib)))
 (require 'rx)
+(require 'gql-builder)
 
 (defgroup restclient nil
   "An interactive HTTP client for Emacs."
@@ -829,7 +830,8 @@ Optional argument STAY-IN-WINDOW do not move focus to response buffer if t."
     (define-key map (kbd "C-c C-.") 'restclient-mark-current)
     (define-key map (kbd "C-c C-u") 'restclient-copy-curl-command)
     (define-key map (kbd "C-c n n") 'restclient-narrow-to-current)
-    (define-key map (kbd "C-c C-i") 'restclient-show-info)   
+    (define-key map (kbd "C-c C-i") 'restclient-show-info)
+    (define-key map (kbd "C-c C-e") 'restclient-gql-builder)
     map)
   "Keymap for restclient-mode.")
 
