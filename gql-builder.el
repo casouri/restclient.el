@@ -686,18 +686,11 @@ VAL can be a string, a number, t, or :false."
          (old-val (gql-builder-field-arg-val field))
          (arg-p (gql-builder-field-input-p field)))
     (when arg-p
-      (if (not (string-match-p (rx bos
-                                   (or "String" "Int" "Boolean" "Float" "ID")
-                                   (* "!")
-                                   eos)
-                               (gql-builder--render-type type)))
-          (message "Editing array arg is not supported: %s"
-                   (gql-builder--render-type type))
-        (let ((val (read-string "Value: " old-val)))
-          (setf (gql-builder-field-arg-val field) val
-                (gql-builder-field-marked field) t)
-          (gql-builder--redraw-field field)
-          (goto-char orig-point)))
+      (let ((val (read-string "Value: " old-val)))
+        (setf (gql-builder-field-arg-val field) val
+              (gql-builder-field-marked field) t)
+        (gql-builder--redraw-field field)
+        (goto-char orig-point))
       (forward-line 1))))
 
 (defun gql-builder-toggle-marked-all ()
