@@ -618,6 +618,19 @@ bound to C-c C-r."
                (url (restclient-replace-all-in-string vars url)))
           (apply func method url headers entity args))))))
 
+(defun restclient-shell-quote-argument (arg)
+  "Quote ARG but don’t escape whitespaces.
+
+Quote by wrapping ARG with single quote and escaping single quotes in
+ARG. This way the quoted string is cleaner than what
+‘shell-quote-argument’ produces."
+  (with-temp-buffer
+    (insert arg)
+    (goto-char (point-min))
+    (while (search-forward "'" nil t)
+      (replace-match "\\'" nil t))
+    (concat "'" (buffer-string) "'")))
+
 (defun restclient-copy-curl-command ()
   "Formats the request as a curl command and copies the command to the clipboard."
   (interactive)
@@ -630,13 +643,13 @@ bound to C-c C-r."
                                (list "-H" (format "%s: %s" (car header) (cdr header))))
                              headers))))
         (kill-new (concat "curl "
-                          (mapconcat 'shell-quote-argument
+                          (mapconcat 'restclient-shell-quote-argument
                                      (append '("-i")
                                              header-args
                                              (list (concat "-X" converted-method))
                                              (list url)
                                              (when (> (string-width entity) 0)
-                                               (list "-d" (restclient-gql-convert-body method entity))))
+                                               (list "-d" (restclient-gql-convert-body method entity t))))
                                      " "))))
       (message "curl command copied to clipboard."))))
 
