@@ -256,7 +256,7 @@ with \"=-=\" at the beginning. The variable part can be omitted.
 
 Convert the two into a JSON object suitable for the POST request."
   (if (not (equal method "GQL"))
-      body
+      (string-trim body)
     (with-temp-buffer
       (insert (string-trim body))
       (goto-char (point-min))
@@ -649,7 +649,7 @@ ARG. This way the quoted string is cleaner than what
                                              (list (concat "-X" converted-method))
                                              (list url)
                                              (when (> (string-width entity) 0)
-                                               (list "-d" (restclient-gql-convert-body method entity t))))
+                                               (list "-d" (restclient-gql-convert-body method entity))))
                                      " "))))
       (message "curl command copied to clipboard."))))
 
